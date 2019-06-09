@@ -34,7 +34,7 @@ namespace HybridDistributedCache.Controllers
         }
         
         [HttpDelete("{id}")]
-        public NoContentResult DeleteAsync(int id)
+        public NoContentResult Remove(int id)
         {
             this._myComplexValueRepository.Remove(id);
             return new NoContentResult();
