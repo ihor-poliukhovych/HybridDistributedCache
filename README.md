@@ -57,6 +57,11 @@ sequenceDiagram
   instance reloads.
 - **Redis outage.** Reads keep serving local data and log a warning. Writes throw, because the
   other instances cannot be told about the change.
+- **Data source failure (fail-safe).** If a reload fails, the cache logs the error and keeps
+  serving the previous data set. It does not call the data source again until
+  `ReloadRetryInterval` (5 seconds by default) has passed, so a struggling database does not get
+  one full load per request. Only a failed first load, when there is no previous data, throws to
+  the caller.
 
 ## Usage
 
@@ -82,6 +87,7 @@ builder.Services.AddSingleton<ICacheDataSource<int, Product>, ProductDataSource>
 builder.Services.AddHybridCacheManager<int, Product>(options =>
 {
     options.VersionCheckInterval = TimeSpan.FromSeconds(10);
+    options.ReloadRetryInterval = TimeSpan.FromSeconds(5);
 });
 ```
 
@@ -158,6 +164,9 @@ CI runs all tests, including the integration tests, against a Redis service cont
   `RemoveAsync`, otherwise other instances reload old data.
 - If Redis is unavailable during a write, `SetAsync` throws after it has updated the local copy.
   Other instances learn about the change only with the next successful write or `InvalidateAsync`.
+- While the data source is down, an instance that has missed a change keeps serving the old data
+  set. It logs an error on every failed attempt, and the data catches up after the first
+  successful reload.
 - Values are shared object references. Treat them as immutable, for example use records.
 - There is no per-item expiration and no size limit.
 
@@ -176,6 +185,12 @@ CI runs all tests, including the integration tests, against a Redis service cont
 Use `HybridCache` for many independent keys, large data or data that is expensive to load in full.
 This project fits a small data set that every instance needs completely and that can be reloaded
 cheaply.
+
+[FusionCache](https://github.com/ZiggyCreatures/FusionCache) is a mature general-purpose library
+that covers much more: fail-safe with configurable durations, soft and hard timeouts for the
+factory, eager refresh, and a backplane that invalidates single keys on other instances. The
+fail-safe here borrows its idea in a reduced form. Choose FusionCache when you cache per key or
+need those controls; this project is a small, focused tool for one whole data set per cache.
 
 ## Project layout
 

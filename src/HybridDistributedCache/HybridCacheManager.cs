@@ -13,6 +13,8 @@ namespace HybridDistributedCache;
 /// other instances notice a change earlier.</para>
 /// <para>Loads, version checks and local writes run one at a time behind a single gate, so a burst
 /// of reads after a change triggers exactly one reload.</para>
+/// <para>If a reload fails, the previous data set is served and the data source is not called
+/// again before <see cref="HybridCacheOptions.ReloadRetryInterval"/> has passed.</para>
 /// </remarks>
 public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey, TValue>, IAsyncDisposable
     where TKey : notnull
@@ -32,6 +34,7 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     private volatile Snapshot? _snapshot;
     private long _latestKnownVersion = UnknownVersion;
     private long _nextVersionCheckTicks;
+    private long _nextReloadAttemptTicks;
     private IAsyncDisposable? _subscription;
     private bool _disposed;
 
@@ -140,7 +143,8 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     private async ValueTask<Snapshot> GetSnapshotAsync(CancellationToken cancellationToken)
     {
         var snapshot = _snapshot;
-        if (snapshot is not null && !IsStale(snapshot))
+        // A stale copy is served as is while a failed reload waits for its retry.
+        if (snapshot is not null && (!IsStale(snapshot) || !IsReloadDue()))
         {
             if (!IsVersionCheckDue())
             {
@@ -160,7 +164,7 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
                     await CheckVersionAsync(cancellationToken).ConfigureAwait(false);
                 }
 
-                if (IsStale(_snapshot!))
+                if (IsStale(_snapshot!) && IsReloadDue())
                 {
                     await ReloadAsync(cancellationToken).ConfigureAwait(false);
                 }
@@ -178,7 +182,7 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
         try
         {
             snapshot = _snapshot;
-            if (snapshot is null || IsStale(snapshot))
+            if (snapshot is null || (IsStale(snapshot) && IsReloadDue()))
             {
                 await ReloadAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -213,7 +217,24 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
         ObserveVersion(version);
         ScheduleNextVersionCheck();
 
-        var items = await _dataSource.LoadAllAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyDictionary<TKey, TValue> items;
+        try
+        {
+            items = await _dataSource.LoadAllAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (_snapshot is not null && !cancellationToken.IsCancellationRequested)
+        {
+            // Fail-safe: keep the previous data set. It stays stale, so a later read retries.
+            ScheduleNextReloadAttempt();
+            _logger.LogError(
+                ex,
+                "Reload of cache {CacheName} failed; serving the previous data set (version {Version}) and retrying in {RetryInterval}.",
+                _cacheName,
+                _snapshot.Version,
+                _options.ReloadRetryInterval);
+            return;
+        }
+
         _snapshot = new Snapshot(new ConcurrentDictionary<TKey, TValue>(items), version);
 
         _logger.LogDebug("Cache {CacheName} loaded {Count} items at version {Version}.", _cacheName, items.Count, version);
@@ -290,6 +311,12 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
 
     private void ScheduleNextVersionCheck() =>
         Volatile.Write(ref _nextVersionCheckTicks, (_timeProvider.GetUtcNow() + _options.VersionCheckInterval).UtcTicks);
+
+    private bool IsReloadDue() =>
+        _timeProvider.GetUtcNow().UtcTicks >= Volatile.Read(ref _nextReloadAttemptTicks);
+
+    private void ScheduleNextReloadAttempt() =>
+        Volatile.Write(ref _nextReloadAttemptTicks, (_timeProvider.GetUtcNow() + _options.ReloadRetryInterval).UtcTicks);
 
     private sealed record Snapshot(ConcurrentDictionary<TKey, TValue> Items, long Version);
 }

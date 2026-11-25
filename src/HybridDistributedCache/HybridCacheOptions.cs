@@ -20,7 +20,8 @@ public sealed class HybridCacheOptions
 
     /// <summary>
     /// After a failed reload, how long the cache keeps serving the previous data set
-    /// before it calls the data source again.
+    /// before it calls the data source again. A failed first load is not retried
+    /// automatically: its exception reaches the caller, and the next read tries again.
     /// </summary>
     public TimeSpan ReloadRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
 
@@ -30,6 +31,12 @@ public sealed class HybridCacheOptions
         {
             throw new ArgumentOutOfRangeException(
                 nameof(VersionCheckInterval), VersionCheckInterval, "The interval must be positive.");
+        }
+
+        if (ReloadRetryInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ReloadRetryInterval), ReloadRetryInterval, "The interval must be positive.");
         }
     }
 }
