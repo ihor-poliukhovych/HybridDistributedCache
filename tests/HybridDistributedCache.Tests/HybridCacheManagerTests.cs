@@ -194,6 +194,27 @@ public sealed class HybridCacheManagerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Reset_of_the_version_key_is_noticed_when_the_counter_grows_back()
+    {
+        var cache = CreateInstance();
+        await cache.GetAsync(1, Ct);
+        await cache.SetAsync(1, "one", Ct);
+        await cache.SetAsync(1, "one", Ct);
+
+        // The key is flushed, and another writer brings the counter back to the same number
+        // before this instance checks the version again.
+        _redis.Reset();
+        _redis.DeliverNotifications = false;
+        _database.Rows[1] = "uno";
+        await _redis.IncrementVersionAsync("test", Ct);
+        await _redis.IncrementVersionAsync("test", Ct);
+
+        _time.Advance(CheckInterval);
+
+        Assert.Equal("uno", await cache.GetAsync(1, Ct));
+    }
+
+    [Fact]
     public async Task Unavailable_version_store_does_not_break_reads()
     {
         var cache = CreateInstance();
