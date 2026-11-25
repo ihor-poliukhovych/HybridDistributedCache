@@ -8,8 +8,9 @@ namespace HybridDistributedCache.Tests.Fakes;
 /// </summary>
 internal sealed class InMemoryCacheVersionStore : ICacheVersionStore
 {
-    private readonly ConcurrentDictionary<string, long> _versions = new();
-    private readonly ConcurrentDictionary<Guid, (string CacheName, Action<long> Handler)> _subscribers = new();
+    private readonly Lock _lock = new();
+    private readonly Dictionary<string, CacheVersion> _versions = [];
+    private readonly ConcurrentDictionary<Guid, (string CacheName, Action<CacheVersion> Handler)> _subscribers = new();
     private int _getVersionCalls;
 
     public bool DeliverNotifications { get; set; } = true;
@@ -18,17 +19,28 @@ internal sealed class InMemoryCacheVersionStore : ICacheVersionStore
 
     public int GetVersionCalls => Volatile.Read(ref _getVersionCalls);
 
-    public Task<long> GetVersionAsync(string cacheName, CancellationToken cancellationToken = default)
+    public Task<CacheVersion> GetVersionAsync(string cacheName, CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref _getVersionCalls);
         ThrowIfUnavailable();
-        return Task.FromResult(_versions.GetValueOrDefault(cacheName));
+
+        lock (_lock)
+        {
+            return Task.FromResult(GetOrCreate(cacheName));
+        }
     }
 
-    public Task<long> IncrementVersionAsync(string cacheName, CancellationToken cancellationToken = default)
+    public Task<CacheVersion> IncrementVersionAsync(string cacheName, CancellationToken cancellationToken = default)
     {
         ThrowIfUnavailable();
-        var version = _versions.AddOrUpdate(cacheName, 1, (_, current) => current + 1);
+
+        CacheVersion version;
+        lock (_lock)
+        {
+            var current = GetOrCreate(cacheName);
+            version = current with { Counter = current.Counter + 1 };
+            _versions[cacheName] = version;
+        }
 
         if (DeliverNotifications)
         {
@@ -46,7 +58,7 @@ internal sealed class InMemoryCacheVersionStore : ICacheVersionStore
 
     public Task<IAsyncDisposable> SubscribeAsync(
         string cacheName,
-        Action<long> onVersionChanged,
+        Action<CacheVersion> onVersionChanged,
         CancellationToken cancellationToken = default)
     {
         ThrowIfUnavailable();
@@ -56,7 +68,25 @@ internal sealed class InMemoryCacheVersionStore : ICacheVersionStore
     }
 
     /// <summary>Simulates FLUSHALL or eviction of the version key.</summary>
-    public void Reset() => _versions.Clear();
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _versions.Clear();
+        }
+    }
+
+    /// <summary>Mirrors HSETNX on a missing key. Must be called while holding the lock.</summary>
+    private CacheVersion GetOrCreate(string cacheName)
+    {
+        if (!_versions.TryGetValue(cacheName, out var version))
+        {
+            version = new CacheVersion(Guid.NewGuid().ToString("N"), 0);
+            _versions[cacheName] = version;
+        }
+
+        return version;
+    }
 
     private void ThrowIfUnavailable()
     {

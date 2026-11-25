@@ -3,8 +3,8 @@
 [![CI](https://github.com/ihor-poliukhovych/HybridDistributedCache/actions/workflows/ci.yml/badge.svg)](https://github.com/ihor-poliukhovych/HybridDistributedCache/actions/workflows/ci.yml)
 
 An in-memory cache for .NET applications that run as several instances. Every instance keeps the
-whole data set in its own memory. Redis stores only a version number and tells the instances when
-to reload. The cached objects are never serialized.
+whole data set in its own memory. Redis stores only a small version (an epoch and a counter) and
+tells the instances when to reload. The cached objects are never serialized.
 
 Started in 2019, modernized in 2026: .NET 10, reworked synchronization, tests and CI.
 
@@ -32,11 +32,11 @@ sequenceDiagram
     C->>A: PUT /products/1
     A->>S: save product 1
     A->>A: update local copy
-    A->>R: INCR version and PUBLISH it (one Lua script)
-    R-->>B: notification: version 7
-    Note over B: local copy is version 6, so it is stale
+    A->>R: HINCRBY counter and PUBLISH the version (one Lua script)
+    R-->>B: notification: version e1:7
+    Note over B: local copy is version e1:6, so it is stale
     C->>B: GET /products/1
-    B->>R: GET version
+    B->>R: read version
     B->>S: load all products
     B-->>C: product 1, new value
 ```
@@ -50,11 +50,12 @@ sequenceDiagram
   catches the change.
 - **One reload at a time.** Reloads, version checks and local writes run behind a `SemaphoreSlim`.
   A burst of reads after a change causes a single load from the data source.
-- **Missed writes are detected.** When an instance increments the version and gets a number more
+- **Missed writes are detected.** When an instance increments the version and gets a counter more
   than one step ahead of its own copy, another instance wrote in between. The writer then reloads
   instead of trusting its local copy.
-- **Version reset.** If the version in Redis goes down (flush, eviction, a new Redis), every
-  instance reloads.
+- **Version reset.** If the version key disappears (flush, eviction, a new Redis), it comes back
+  with a new epoch, and every instance reloads. This works even when the counter grows back to the
+  number an instance has already seen before that instance checks again.
 - **Redis outage.** Reads keep serving local data and log a warning. Writes throw, because the
   other instances cannot be told about the change.
 - **Data source failure (fail-safe).** If a reload fails, the cache logs the error and keeps
@@ -62,6 +63,28 @@ sequenceDiagram
   `ReloadRetryInterval` (5 seconds by default) has passed, so a struggling database does not get
   one full load per request. Only a failed first load, when there is no previous data, throws to
   the caller.
+
+## Version format
+
+Each cache has one Redis hash, `{prefix}:{cacheName}:version`, with two fields:
+
+| Field | Value |
+|---|---|
+| `epoch` | A GUID, created with `HSETNX` when the key is missing |
+| `counter` | The number of changes in this epoch, raised with `HINCRBY` |
+
+The version travels as `epoch:counter`, for example `3f2b...c1:7`, both as the result of the Lua
+scripts and as the Pub/Sub message on `{prefix}:{cacheName}:changed`. Instances compare the pair:
+a different epoch always means a change, and within one epoch a higher counter means a change.
+Comparing only a number would miss a reset after which the counter grows back to the same value
+(the ABA problem).
+
+Reading a missing key creates it with a new epoch and counter 0, so an instance never stays on an
+empty version that could repeat after the next reset. This makes the version read a write
+command: it must go to the Redis primary.
+
+Upgrading from the earlier integer format: delete the old `{prefix}:*:version` keys first. They
+are strings, and the new scripts fail on them with `WRONGTYPE`.
 
 ## Usage
 
@@ -167,6 +190,8 @@ CI runs all tests, including the integration tests, against a Redis service cont
 - While the data source is down, an instance that has missed a change keeps serving the old data
   set. It logs an error on every failed attempt, and the data catches up after the first
   successful reload.
+- Epochs have no order. If a version read from before a reset arrives after a notification from
+  the new epoch, an instance may serve the old data until its next version check.
 - Values are shared object references. Treat them as immutable, for example use records.
 - There is no per-item expiration and no size limit.
 
@@ -176,7 +201,7 @@ CI runs all tests, including the integration tests, against a Redis service cont
 
 | | Microsoft `HybridCache` | This project |
 |---|---|---|
-| What Redis stores | The cached values (L2), serialized | One version number per cache |
+| What Redis stores | The cached values (L2), serialized | One version (epoch and counter) per cache |
 | Serialization | Yes, for every value in L2 | None |
 | Unit of caching | A single key, loaded on demand | The whole data set, loaded at once |
 | Other instances after a change | Their in-memory copy (L1) stays until its local expiration | Notified through Pub/Sub, reload on next read |
