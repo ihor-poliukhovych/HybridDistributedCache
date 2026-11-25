@@ -6,6 +6,7 @@ namespace HybridDistributedCache.Tests;
 public sealed class HybridCacheManagerTests : IAsyncLifetime
 {
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(3);
 
     private readonly FakeDataSource _database = new();
     private readonly InMemoryCacheVersionStore _redis = new();
@@ -237,6 +238,55 @@ public sealed class HybridCacheManagerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Failed_reload_serves_the_previous_data_and_pauses_before_retrying()
+    {
+        var instanceA = CreateInstance();
+        var instanceB = CreateInstance();
+        await instanceA.GetAsync(1, Ct);
+        await instanceB.GetAsync(1, Ct);
+
+        _database.Rows[1] = "uno";
+        await instanceA.SetAsync(1, "uno", Ct);
+        _database.IsAvailable = false;
+
+        // B knows its copy is stale, but the reload fails: it keeps serving the old copy.
+        Assert.Equal("one", await instanceB.GetAsync(1, Ct));
+        Assert.Equal("one", await instanceB.GetAsync(1, Ct));
+        Assert.Equal(3, _database.LoadCount);
+
+        // Within the pause, nobody calls the data source again.
+        _time.Advance(RetryInterval - TimeSpan.FromSeconds(1));
+        Assert.Equal("one", await instanceB.GetAsync(1, Ct));
+        Assert.Equal(3, _database.LoadCount);
+
+        _database.IsAvailable = true;
+        _time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal("uno", await instanceB.GetAsync(1, Ct));
+        Assert.Equal(4, _database.LoadCount);
+    }
+
+    [Fact]
+    public async Task Failed_first_load_reaches_the_caller()
+    {
+        _database.IsAvailable = false;
+        var cache = CreateInstance();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await cache.GetAsync(1, Ct));
+
+        _database.IsAvailable = true;
+        Assert.Equal("one", await cache.GetAsync(1, Ct));
+    }
+
+    [Fact]
+    public void Non_positive_retry_interval_is_rejected()
+    {
+        var options = new HybridCacheOptions { ReloadRetryInterval = TimeSpan.Zero };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new HybridCacheManager<int, string>(_database, _redis, options, _time));
+    }
+
+    [Fact]
     public void Non_positive_interval_is_rejected()
     {
         var options = new HybridCacheOptions { VersionCheckInterval = TimeSpan.Zero };
@@ -262,6 +312,7 @@ public sealed class HybridCacheManagerTests : IAsyncLifetime
             CacheName = "test",
             VersionCheckInterval = CheckInterval,
             UsePubSub = usePubSub,
+            ReloadRetryInterval = RetryInterval,
         };
 
         var instance = new HybridCacheManager<int, string>(_database, _redis, options, _time);

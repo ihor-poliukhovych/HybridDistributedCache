@@ -18,6 +18,12 @@ public sealed class HybridCacheOptions
     /// <summary>Subscribe to change notifications so that other instances react immediately.</summary>
     public bool UsePubSub { get; set; } = true;
 
+    /// <summary>
+    /// After a failed reload, how long the cache keeps serving the previous data set
+    /// before it calls the data source again.
+    /// </summary>
+    public TimeSpan ReloadRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
+
     internal void Validate()
     {
         if (VersionCheckInterval <= TimeSpan.Zero)
