@@ -163,6 +163,35 @@ public sealed class HybridCacheManagerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Reads_during_a_reload_get_the_previous_data_without_waiting()
+    {
+        var instanceA = CreateInstance();
+        var instanceB = CreateInstance();
+        await instanceA.GetAsync(1, Ct);
+        await instanceB.GetAsync(1, Ct);
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _database.LoadGate = gate.Task;
+        _database.Rows[1] = "uno";
+        await instanceA.SetAsync(1, "uno", Ct);
+
+        // The first read on B starts a slow reload and waits for it.
+        var reloading = Task.Run(async () => await instanceB.GetAsync(1, Ct), Ct);
+        await WaitUntilAsync(() => _database.LoadCount == 3);
+
+        // A concurrent read gets the previous data at once.
+        var concurrent = instanceB.GetAsync(1, Ct).AsTask();
+        var completedWithoutWaiting = concurrent.IsCompleted;
+        gate.SetResult();
+
+        Assert.True(completedWithoutWaiting, "The concurrent read waited for the reload.");
+        Assert.Equal("one", await concurrent);
+        Assert.Equal("uno", await reloading);
+        Assert.Equal("uno", await instanceB.GetAsync(1, Ct));
+        Assert.Equal(3, _database.LoadCount);
+    }
+
+    [Fact]
     public async Task Invalidate_makes_every_instance_reload()
     {
         var instanceA = CreateInstance();
