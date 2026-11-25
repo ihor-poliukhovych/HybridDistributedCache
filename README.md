@@ -50,6 +50,9 @@ sequenceDiagram
   catches the change.
 - **One reload at a time.** Reloads, version checks and local writes run behind a `SemaphoreSlim`.
   A burst of reads after a change causes a single load from the data source.
+- **No waiting for a reload (stale-while-revalidate).** The read that starts a reload waits for
+  it. Reads that arrive meanwhile get the previous data set at once instead of queuing behind the
+  load. Only the very first load, when there is no data yet, makes readers wait.
 - **Missed writes are detected.** When an instance increments the version and gets a counter more
   than one step ahead of its own copy, another instance wrote in between. The writer then reloads
   instead of trusting its local copy.
@@ -183,6 +186,10 @@ CI runs all tests, including the integration tests, against a Redis service cont
   frequent full loads from the data source.
 - Consistency is eventual. Other instances see a change after the Pub/Sub message arrives
   (usually milliseconds), or within `VersionCheckInterval` if the message is lost.
+- Reads that run while a reload is in progress get the previous data set. On the writing
+  instance, `SetAsync` and `RemoveAsync` change the local copy directly, so its reads see the
+  change at once. After `InvalidateAsync`, the next read reloads, and reads that overlap with that
+  reload still get the old data.
 - The cache is not the source of truth. Save to the data source before calling `SetAsync` or
   `RemoveAsync`, otherwise other instances reload old data.
 - If Redis is unavailable during a write, `SetAsync` throws after it has updated the local copy.
