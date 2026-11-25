@@ -12,7 +12,8 @@ namespace HybridDistributedCache;
 /// once per <see cref="HybridCacheOptions.VersionCheckInterval"/>; Pub/Sub notifications make
 /// other instances notice a change earlier.</para>
 /// <para>Loads, version checks and local writes run one at a time behind a single gate, so a burst
-/// of reads after a change triggers exactly one reload.</para>
+/// of reads after a change triggers exactly one reload. While it runs, the other readers get the
+/// previous data set (stale-while-revalidate); only the first load makes readers wait.</para>
 /// <para>If a reload fails, the previous data set is served and the data source is not called
 /// again before <see cref="HybridCacheOptions.ReloadRetryInterval"/> has passed.</para>
 /// </remarks>
@@ -142,15 +143,17 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     private async ValueTask<Snapshot> GetSnapshotAsync(CancellationToken cancellationToken)
     {
         var snapshot = _snapshot;
-        // A stale copy is served as is while a failed reload waits for its retry.
-        if (snapshot is not null && (!IsStale(snapshot) || !IsReloadDue()))
+        if (snapshot is not null)
         {
-            if (!IsVersionCheckDue())
+            // A stale copy is not reloaded while a failed reload waits for its retry.
+            var reloadDue = IsStale(snapshot) && IsReloadDue();
+            if (!reloadDue && !IsVersionCheckDue())
             {
                 return snapshot;
             }
 
-            // Only one reader checks the version. Everybody else keeps reading the current data.
+            // Only one reader checks the version or reloads. Everybody else keeps reading
+            // the current data, even if it is already known to be stale.
             if (!_gate.Wait(0))
             {
                 return snapshot;
@@ -176,12 +179,11 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
             }
         }
 
-        // No data yet, or we know it is out of date: wait for a single reload.
+        // No data yet: wait for a single first load.
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            snapshot = _snapshot;
-            if (snapshot is null || (IsStale(snapshot) && IsReloadDue()))
+            if (_snapshot is null)
             {
                 await ReloadAsync(cancellationToken).ConfigureAwait(false);
             }
