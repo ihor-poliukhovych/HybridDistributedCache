@@ -20,9 +20,6 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     where TKey : notnull
     where TValue : class
 {
-    /// <summary>The version is unknown because the version store could not be reached.</summary>
-    private const long UnknownVersion = -1;
-
     private readonly ICacheDataSource<TKey, TValue> _dataSource;
     private readonly ICacheVersionStore _versionStore;
     private readonly HybridCacheOptions _options;
@@ -32,7 +29,9 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private volatile Snapshot? _snapshot;
-    private long _latestKnownVersion = UnknownVersion;
+
+    // Null while the version is unknown because the version store could not be reached.
+    private CacheVersion? _latestKnownVersion;
     private long _nextVersionCheckTicks;
     private long _nextReloadAttemptTicks;
     private IAsyncDisposable? _subscription;
@@ -127,7 +126,7 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
 
             // If nobody else wrote since our last load, the local copy now matches the new version.
             // Otherwise we missed someone's change: keep the old version so the next read reloads.
-            if (snapshot is not null && snapshot.Version != UnknownVersion && version == snapshot.Version + 1)
+            if (snapshot?.Version is { } loaded && version.Follows(loaded))
             {
                 _snapshot = snapshot with { Version = version };
             }
@@ -202,7 +201,7 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
 
         // Read the version before the data. A change that lands during the load
         // raises the version again, and the next read reloads once more.
-        long version;
+        CacheVersion? version;
         try
         {
             version = await _versionStore.GetVersionAsync(_cacheName, cancellationToken).ConfigureAwait(false);
@@ -210,11 +209,15 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Version store is unavailable; cache {CacheName} is loaded without a version.", _cacheName);
-            version = UnknownVersion;
-            Interlocked.Exchange(ref _latestKnownVersion, UnknownVersion);
+            version = null;
+            Volatile.Write(ref _latestKnownVersion, null);
         }
 
-        ObserveVersion(version);
+        if (version is not null)
+        {
+            ObserveVersion(version);
+        }
+
         ScheduleNextVersionCheck();
 
         IReadOnlyDictionary<TKey, TValue> items;
@@ -248,15 +251,9 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
             await EnsureSubscribedAsync(cancellationToken).ConfigureAwait(false);
             var version = await _versionStore.GetVersionAsync(_cacheName, cancellationToken).ConfigureAwait(false);
 
-            if (version < _snapshot!.Version)
-            {
-                // The version went down: the Redis key was flushed or evicted. Reload to be safe.
-                Interlocked.Exchange(ref _latestKnownVersion, version);
-            }
-            else
-            {
-                ObserveVersion(version);
-            }
+            // A flushed or evicted key comes back with a new epoch, so it is seen as a change
+            // even when its counter has grown back to the number we loaded.
+            ObserveVersion(version);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -288,14 +285,17 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
         }
     }
 
-    /// <summary>Raises the latest known version; never lowers it. Safe to call from any thread.</summary>
-    private void ObserveVersion(long version)
+    /// <summary>
+    /// Moves the latest known version forward: to a new epoch, or to a higher counter in the same
+    /// epoch. Never moves it back within an epoch. Safe to call from any thread.
+    /// </summary>
+    private void ObserveVersion(CacheVersion version)
     {
         var current = Volatile.Read(ref _latestKnownVersion);
-        while (version > current)
+        while (current is null || version.Supersedes(current))
         {
             var previous = Interlocked.CompareExchange(ref _latestKnownVersion, version, current);
-            if (previous == current)
+            if (ReferenceEquals(previous, current))
             {
                 return;
             }
@@ -318,5 +318,6 @@ public sealed class HybridCacheManager<TKey, TValue> : IHybridCacheManager<TKey,
     private void ScheduleNextReloadAttempt() =>
         Volatile.Write(ref _nextReloadAttemptTicks, (_timeProvider.GetUtcNow() + _options.ReloadRetryInterval).UtcTicks);
 
-    private sealed record Snapshot(ConcurrentDictionary<TKey, TValue> Items, long Version);
+    /// <summary>A loaded data set. <see cref="Version"/> is null when it was loaded without the version store.</summary>
+    private sealed record Snapshot(ConcurrentDictionary<TKey, TValue> Items, CacheVersion? Version);
 }

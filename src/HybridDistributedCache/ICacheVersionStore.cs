@@ -6,13 +6,16 @@ namespace HybridDistributedCache;
 /// </summary>
 public interface ICacheVersionStore
 {
-    /// <summary>Returns the current version, or 0 when no change was recorded yet.</summary>
-    Task<long> GetVersionAsync(string cacheName, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Returns the current version. When there is none yet, or it was lost, creates one with a
+    /// new epoch and counter 0, so that every reset is seen as a new epoch.
+    /// </summary>
+    Task<CacheVersion> GetVersionAsync(string cacheName, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Increments the version, notifies the subscribers and returns the new version.
+    /// Increments the counter, notifies the subscribers and returns the new version.
     /// </summary>
-    Task<long> IncrementVersionAsync(string cacheName, CancellationToken cancellationToken = default);
+    Task<CacheVersion> IncrementVersionAsync(string cacheName, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Subscribes to version changes. Notifications are best effort: they can be lost
@@ -20,6 +23,6 @@ public interface ICacheVersionStore
     /// </summary>
     Task<IAsyncDisposable> SubscribeAsync(
         string cacheName,
-        Action<long> onVersionChanged,
+        Action<CacheVersion> onVersionChanged,
         CancellationToken cancellationToken = default);
 }

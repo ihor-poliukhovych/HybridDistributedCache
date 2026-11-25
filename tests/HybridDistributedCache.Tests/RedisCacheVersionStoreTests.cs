@@ -18,15 +18,37 @@ public sealed class RedisCacheVersionStoreTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
-    public async Task Increment_returns_the_new_version_and_get_reads_it()
+    public async Task Increment_raises_the_counter_within_one_epoch()
     {
         await using var redis = await ConnectAsync();
         var store = new RedisCacheVersionStore(redis, _keyPrefix);
 
-        Assert.Equal(0, await store.GetVersionAsync("products", Ct));
-        Assert.Equal(1, await store.IncrementVersionAsync("products", Ct));
-        Assert.Equal(2, await store.IncrementVersionAsync("products", Ct));
-        Assert.Equal(2, await store.GetVersionAsync("products", Ct));
+        var initial = await store.GetVersionAsync("products", Ct);
+        Assert.Equal(0, initial.Counter);
+        Assert.False(string.IsNullOrEmpty(initial.Epoch));
+        Assert.Equal(initial, await store.GetVersionAsync("products", Ct));
+
+        Assert.Equal(new CacheVersion(initial.Epoch, 1), await store.IncrementVersionAsync("products", Ct));
+        Assert.Equal(new CacheVersion(initial.Epoch, 2), await store.IncrementVersionAsync("products", Ct));
+        Assert.Equal(new CacheVersion(initial.Epoch, 2), await store.GetVersionAsync("products", Ct));
+    }
+
+    [Fact]
+    public async Task Deleted_key_comes_back_with_a_new_epoch()
+    {
+        await using var redis = await ConnectAsync();
+        var store = new RedisCacheVersionStore(redis, _keyPrefix);
+
+        await store.IncrementVersionAsync("products", Ct);
+        var before = await store.IncrementVersionAsync("products", Ct);
+
+        await redis.GetDatabase().KeyDeleteAsync($"{_keyPrefix}:products:version");
+        await store.IncrementVersionAsync("products", Ct);
+        var after = await store.IncrementVersionAsync("products", Ct);
+
+        Assert.Equal(before.Counter, after.Counter);
+        Assert.NotEqual(before.Epoch, after.Epoch);
+        Assert.True(after.Supersedes(before));
     }
 
     [Fact]
@@ -37,12 +59,13 @@ public sealed class RedisCacheVersionStoreTests
         var publisher = new RedisCacheVersionStore(publisherConnection, _keyPrefix);
         var subscriber = new RedisCacheVersionStore(subscriberConnection, _keyPrefix);
 
-        var received = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new TaskCompletionSource<CacheVersion>(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var subscription = await subscriber.SubscribeAsync("products", v => received.TrySetResult(v), Ct);
 
-        await publisher.IncrementVersionAsync("products", Ct);
+        var published = await publisher.IncrementVersionAsync("products", Ct);
 
-        Assert.Equal(1, await received.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct));
+        Assert.Equal(1, published.Counter);
+        Assert.Equal(published, await received.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct));
     }
 
     private static async Task<ConnectionMultiplexer> ConnectAsync()
