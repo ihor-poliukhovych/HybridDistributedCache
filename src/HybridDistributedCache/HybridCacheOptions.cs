@@ -18,12 +18,25 @@ public sealed class HybridCacheOptions
     /// <summary>Subscribe to change notifications so that other instances react immediately.</summary>
     public bool UsePubSub { get; set; } = true;
 
+    /// <summary>
+    /// After a failed reload, how long the cache keeps serving the previous data set
+    /// before it calls the data source again. A failed first load is not retried
+    /// automatically: its exception reaches the caller, and the next read tries again.
+    /// </summary>
+    public TimeSpan ReloadRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
+
     internal void Validate()
     {
         if (VersionCheckInterval <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(VersionCheckInterval), VersionCheckInterval, "The interval must be positive.");
+        }
+
+        if (ReloadRetryInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ReloadRetryInterval), ReloadRetryInterval, "The interval must be positive.");
         }
     }
 }
