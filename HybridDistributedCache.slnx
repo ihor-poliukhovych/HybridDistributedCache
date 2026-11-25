@@ -5,4 +5,7 @@
   <Folder Name="/src/">
     <Project Path="src/HybridDistributedCache/HybridDistributedCache.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HybridDistributedCache.Tests/HybridDistributedCache.Tests.csproj" />
+  </Folder>
 </Solution>
