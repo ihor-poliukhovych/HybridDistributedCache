@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>HybridDistributedCache</RootNamespace>
+    <Description>In-memory cache for multi-instance .NET apps that uses Redis only to tell instances when to reload.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.15" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.35" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HybridDistributedCache.Tests" />
+  </ItemGroup>
+
+</Project>
